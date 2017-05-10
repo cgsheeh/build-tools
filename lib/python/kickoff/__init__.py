@@ -2,6 +2,7 @@ import re
 import requests
 import logging
 
+from buglist_creator import create_bugs_url
 from kickoff.api import Releases, Release, ReleaseL10n
 from release.l10n import parsePlainL10nChangesets
 from release.versions import getAppVersion
@@ -97,6 +98,7 @@ class ReleaseRunner(object):
 
 def email_release_drivers(smtp_server, from_, to, release, task_group_id, l10n_url):
     # Send an email to the mailing after the build
+    tags_comparison_description, standard_bugs_url, backout_bugs_url = create_bugs_url(release)
 
     content = """\
 A new build has been submitted through ship-it:
@@ -108,10 +110,13 @@ Locales: {l10n_url} (requires VPN access)
 Created by {submitter}
 Started by {starter}
 
-
+{tags_comparison_description}
+{standard_bugs_str}
+{backout_bugs_str}
 """.format(path=release["branch"], revision=release["mozillaRevision"],
            submitter=release["submitter"], starter=release["starter"],
-           task_group_id=task_group_id, l10n_url=l10n_url)
+           task_group_id=task_group_id, l10n_url=l10n_url,
+           standard_bugs_str=standard_bugs_url, backout_bugs_str=backout_bugs_url)
 
     comment = release.get("comment")
     if comment:
