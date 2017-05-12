@@ -156,24 +156,3 @@ def format_return_value(description, unique_bugs, unique_backout_bugs):
                                                                         backout_bz_url=backout_bugs_link)
 
     return return_str[:-1] if return_str.endswith('\n') else return_str  # Remove trailing newline
-
-#
-# if __name__ == '__main__':
-#     # import pickle
-#     # dl = pickle.load(open('d.p', 'r'))
-#     #
-#     # dum = []
-#     # for d in dl:
-#     #     if d['product'] == 'fennec':
-#     #         s = create_bugs_url(d)
-#     #         dum.append(s)
-#     #
-#     # from pprint import pprint
-#     # pprint(dum)
-#
-#     url = 'https://hg.mozilla.org/releases/mozilla-release/json-pushes?fromchange=d345b657d381&tochange=f87a819106bd&full=1'
-#     changeset_data = requests.get(url).json()
-#
-#     bugs, backouts = get_bugs_in_changeset(changeset_data)
-#     print bugs
-#     print backouts
