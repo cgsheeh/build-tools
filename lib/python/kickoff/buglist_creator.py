@@ -9,18 +9,14 @@ BACKOUT_REGEX = r'back(\s?)out|backed out|backing out'
 BUGZILLA_BUGLIST_TEMPLATE = 'https://bugzilla.mozilla.org/buglist.cgi?bug_id={bugs}'
 BUG_NUMBER_REGEX = r'bug \d+'
 CHANGELOG_TO_FROM_STRING = '{product}_{version}_RELEASE'
-CHANGESET_URL_TEMPLATE = 'https://hg.mozilla.org/{release_branch}/json-pushes?fromchange={from_version}&tochange={to_version}&full=1'
-LIST_DESCRIPTION_TEMPLATE = 'Comparing Mercurial tag {from_version} to {to_version}:\n'
+CHANGESET_URL_TEMPLATE = 'https://hg.mozilla.org/{release_branch}/{logtype}?fromchange={from_version}&tochange={to_version}&full=1'
+FULL_CHANGESET_PREFIX = 'Full Mercurial changeset: '
+LIST_DESCRIPTION_TEMPLATE = 'Comparing Mercurial tag {from_version} to {to_version}:'
 MERCURIAL_TAGS_URL_TEMPLATE = 'https://hg.mozilla.org/{release_branch}/json-tags'
 NO_BUGS = ''  # Return this when bug list can't be created
 URL_SHORTENER_TEMPLATE = 'https://bugzilla.mozilla.org/rest/bitly/shorten?url={url}'
 
 log = logging.getLogger(__name__)
-
-
-class BuglistCreatorException(Exception):
-    """Custom Exception for Buglist creator"""
-    pass
 
 
 def create_bugs_url(release):
@@ -31,6 +27,7 @@ def create_bugs_url(release):
     :return: str -> description of compared releases, with Bugzilla links containing all bugs in changeset
     """
     try:
+        # Extract the important data, ignore if beta1 release
         current_version_dot = release['version']
         if re.search(r'b1$', current_version_dot):
             # If the version is beta 1, don't make any links
@@ -38,24 +35,39 @@ def create_bugs_url(release):
 
         product = release['product']
         branch = release['branch']
+        current_revision = release['mozillaRevision']
 
-        current_version_tag, previous_version_tag = get_tag_versions(product, branch, current_version_dot)
-        description_string = LIST_DESCRIPTION_TEMPLATE.format(from_version=previous_version_tag,
-                                                              to_version=current_version_tag)
+        # Get the tag version, for display purposes
+        current_version_tag = dot_version_to_tag_version(product, current_version_dot)
 
+        # Get all Hg tags for this branch, determine the previous version
+        tag_url = MERCURIAL_TAGS_URL_TEMPLATE.format(release_branch=branch)
+        mercurial_tags_json = requests.get(tag_url).json()
+        previous_version_tag = get_previous_tag_version(product, current_version_dot, mercurial_tags_json)
+
+        # Get the changeset between these versions, parse for all unique bugs and backout bugs
         resp = requests.get(CHANGESET_URL_TEMPLATE.format(release_branch=branch,
                                                           from_version=previous_version_tag,
-                                                          to_version=current_version_tag))
+                                                          to_version=current_revision,
+                                                          logtype='json-pushes'))
         changeset_data = resp.json()
-
         unique_bugs, unique_backout_bugs = get_bugs_in_changeset(changeset_data)
 
+        # Return a descriptive string with links if any relevant bugs are found
         if unique_bugs or unique_backout_bugs:
-            return format_return_value(description_string, unique_bugs, unique_backout_bugs)
+            description_string = LIST_DESCRIPTION_TEMPLATE.format(from_version=previous_version_tag,
+                                                                  to_version=current_version_tag)
+
+            changeset_html = CHANGESET_URL_TEMPLATE.format(release_branch=branch,
+                                                           from_version=previous_version_tag,
+                                                           to_version=current_revision,
+                                                           logtype='pushloghtml')
+
+            return format_return_value(description_string, unique_bugs, unique_backout_bugs, changeset_html)
         else:
             return NO_BUGS
 
-    except (requests.HTTPError, JSONDecodeError, BuglistCreatorException,) as err:
+    except (requests.HTTPError, JSONDecodeError, ValueError,) as err:
         log.info(err)
         return NO_BUGS
 
@@ -64,7 +76,7 @@ def get_bugs_in_changeset(changeset_data):
     unique_bugs, unique_backout_bugs = set(), set()
     for data in changeset_data.values():
         for changeset in data['changesets']:
-            if is_test_only_change(changeset):
+            if is_excluded_change(changeset):
                 continue
 
             changeset_desc_lower = changeset['desc'].lower()
@@ -72,7 +84,6 @@ def get_bugs_in_changeset(changeset_data):
 
             if bug_re:
                 bug_number = bug_re.group().split(' ')[1]
-                print bug_re.group()
 
                 if is_backout_bug(changeset_desc_lower):
                     unique_backout_bugs.add(bug_number)
@@ -82,8 +93,12 @@ def get_bugs_in_changeset(changeset_data):
     return unique_bugs, unique_backout_bugs
 
 
-def is_test_only_change(changeset):
-    return 'a=test-only' in changeset['desc']
+def is_excluded_change(changeset):
+    excluded_change_keywords = [
+        'a=test-only',
+        'a=release',
+    ]
+    return any(keyword in changeset['desc'] for keyword in excluded_change_keywords)
 
 
 def is_backout_bug(changeset_description_lowercase):
@@ -117,12 +132,8 @@ def tag_version_to_dot_version_parse(tag):
     return parse_version(dot_version)
 
 
-def get_tag_versions(product, branch, current_version_dot):
+def get_previous_tag_version(product, current_version_dot, mercurial_tags_json):
     """Gets the previous hg version tag for the product and branch, given the current version tag"""
-    current_version_tag = dot_version_to_tag_version(product, current_version_dot)
-
-    tag_url = MERCURIAL_TAGS_URL_TEMPLATE.format(release_branch=branch)
-    response_json = requests.get(tag_url).json()
 
     def _invalid_tag_filter(tag):
         """Filters by product and removes incorrect major version + base, end releases"""
@@ -136,23 +147,21 @@ def get_tag_versions(product, branch, current_version_dot):
                re.match(prod_major_version_re, tag)
 
     # Get rid of irrelevant tags, sort by date and extract the tag string
-    tags = set(map(itemgetter('tag'), response_json['tags']))
+    tags = set(map(itemgetter('tag'), mercurial_tags_json['tags']))
     tags = filter(_invalid_tag_filter, tags)
     dot_tag_version_mapping = zip(map(tag_version_to_dot_version_parse, tags), tags)
     dot_tag_version_mapping = sorted(dot_tag_version_mapping, key=itemgetter(0))
 
-    try:
-        next_version_index = map(itemgetter(0), dot_tag_version_mapping).index(parse_version(current_version_dot)) - 1
-    except ValueError as err:
-        raise BuglistCreatorException("Couldn't find a tag for {}: {}".format(current_version_tag, err))
+    next_version_index = map(itemgetter(0), dot_tag_version_mapping).index(parse_version(current_version_dot)) - 1
 
-    return current_version_tag, dot_tag_version_mapping[next_version_index][1]
+    return dot_tag_version_mapping[next_version_index][1]
 
 
-def format_return_value(description, unique_bugs, unique_backout_bugs):
+def format_return_value(description, unique_bugs, unique_backout_bugs, changeset_html):
     reg_bugs_link, backout_bugs_link = create_short_url_with_prefix(unique_bugs, unique_backout_bugs)
-    return_str = '{description}{regular_bz_url}{backout_bz_url}'.format(description=description,
-                                                                        regular_bz_url=reg_bugs_link,
-                                                                        backout_bz_url=backout_bugs_link)
+    changeset_full = FULL_CHANGESET_PREFIX + changeset_html
+    return_str = '{description}\n{regular_bz_url}{backout_bz_url}{changeset_full}'\
+        .format(description=description, regular_bz_url=reg_bugs_link,
+                backout_bz_url=backout_bugs_link, changeset_full=changeset_full)
 
-    return return_str[:-1] if return_str.endswith('\n') else return_str  # Remove trailing newline
+    return return_str
