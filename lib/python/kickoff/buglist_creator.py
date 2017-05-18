@@ -70,7 +70,6 @@ def create_bugs_url(release):
 
     except (requests.HTTPError, JSONDecodeError, ValueError,) as err:
         log.info(err)
-        print err
         return NO_BUGS
 
 
